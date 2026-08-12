@@ -10,63 +10,48 @@ def get(url, headers=None):
     h={'User-Agent':UA,'Accept':'*/*'}
     if headers: h.update(headers)
     req=urllib.request.Request(url,headers=h)
-    try:
-        with urllib.request.urlopen(req,timeout=60) as r:
-            return r.status,dict(r.headers),r.read()
-    except urllib.error.HTTPError as e:
-        return e.code,dict(e.headers),e.read()
+    with urllib.request.urlopen(req,timeout=60) as r:
+        return r.status,dict(r.headers),r.read()
 
 html=None; page_url=None
 for candidate in (SITE+'/',SITE+'/library'):
-    st,hd,b=get(candidate)
-    text=b.decode('utf-8','replace')
-    if st<400 and '<script' in text:
-        html=text; page_url=candidate; break
+    try:
+        st,hd,b=get(candidate)
+        text=b.decode('utf-8','replace')
+        if st<400 and '<script' in text:
+            html=text; page_url=candidate; break
+    except Exception:
+        pass
 if not html: raise RuntimeError('Could not fetch site HTML')
-(out/'index.html').write_text(html,encoding='utf-8')
-
 srcs=re.findall(r'<script\b[^>]*?src=["\']([^"\']+)["\']',html,flags=re.I)
-if not srcs: raise RuntimeError('No script src found')
-# choose module/assets JS first
 script_src=next((s for s in srcs if '/assets/' in s and s.endswith('.js')),srcs[-1])
 bundle_url=urllib.parse.urljoin(page_url,script_src)
-st,hd,b=get(bundle_url)
-if st>=400: raise RuntimeError(f'Bundle fetch failed {st}')
-js=b.decode('utf-8','replace')
-(out/'bundle.js').write_text(js,encoding='utf-8')
+st,hd,b=get(bundle_url); js=b.decode('utf-8','replace')
+base=re.search(r'https://[a-z0-9]+\.supabase\.co',js).group(0)
+km=re.search(r'eyJ[\w-]+\.eyJ[\w-]+\.[\w-]+',js) or re.search(r'sb_publishable_[A-Za-z0-9._-]+',js)
+if not km: raise RuntimeError('Public Supabase key not found')
+key=km.group(0)
+headers={'apikey':key,'Authorization':'Bearer '+key,'Accept':'application/json'}
 
-projects=sorted(set(re.findall(r'https://[a-z0-9]+\.supabase\.co',js)))
-keys=re.findall(r'eyJ[\w-]+\.eyJ[\w-]+\.[\w-]+',js)+re.findall(r'sb_publishable_[A-Za-z0-9._-]+',js)
-# public keys are intentionally not written to artifact/log
-interesting=[]
-for term in ['bibles','bible_pages','files','documents','library','storage/v1','rest/v1','supabase','approved','file_path','file_name','download']:
-    positions=[m.start() for m in re.finditer(re.escape(term),js,flags=re.I)]
-    interesting.append({'term':term,'count':len(positions),'positions':positions[:20]})
+select='id,uploader_id,name,description,size_bytes,mime_type,storage_path,download_count,approved,created_at'
+q=urllib.parse.urlencode({'select':select,'order':'created_at.asc','limit':'1000'},safe='*,():!')
+st,hd,body=get(base+'/rest/v1/files?'+q,headers)
+files=json.loads(body)
+if not isinstance(files,list): raise RuntimeError('Unexpected files response: '+body[:500].decode('utf-8','replace'))
 
-url_candidates=sorted(set(re.findall(r'https://[^"\'`\\\s]+',js)))
-# keep only host/path discovery, strip query/fragments and redact JWT-like strings
-safe_urls=[]
-for u in url_candidates:
-    u=re.sub(r'eyJ[\w-]+\.eyJ[\w-]+\.[\w-]+','<redacted-public-key>',u)
-    if any(x in u for x in ['supabase','freebibleaccess','storage','rest','api']): safe_urls.append(u[:500])
-
-endpoint_tests=[]
-for base in projects:
-    for p in ['/rest/v1/','/rest/v1/bibles?select=id&limit=1','/rest/v1/bible_pages?select=id&limit=1','/storage/v1/bucket']:
-        headers={}
-        if keys:
-            headers['apikey']=keys[0]
-            if keys[0].startswith('eyJ'): headers['Authorization']='Bearer '+keys[0]
-        st,resp_h,body=get(base+p,headers)
-        endpoint_tests.append({'url':base+p.split('?')[0],'status':st,'body_prefix':body[:300].decode('utf-8','replace')})
-
+approved=sum(1 for f in files if f.get('approved'))
+pending=len(files)-approved
+total_bytes=sum(int(f.get('size_bytes') or 0) for f in files)
+by_mime={}
+for f in files:
+    m=f.get('mime_type') or 'unknown'; by_mime[m]=by_mime.get(m,0)+1
 summary={
  'fetched_at':datetime.now(timezone.utc).isoformat(),
- 'page_url':page_url,'bundle_url':bundle_url,'bundle_bytes':len(b),
- 'supabase_projects':projects,'public_key_found':bool(keys),
- 'script_srcs':srcs,'interesting_terms':interesting,
- 'safe_url_candidates':safe_urls[:200],
- 'endpoint_tests':endpoint_tests
+ 'site':SITE,'bundle_url':bundle_url,'supabase_base':base,'bucket':'library-files',
+ 'file_count':len(files),'approved_count':approved,'pending_count':pending,
+ 'total_bytes':total_bytes,'total_gib':round(total_bytes/1024**3,3),
+ 'by_mime':dict(sorted(by_mime.items()))
 }
-(out/'diagnostic.json').write_text(json.dumps(summary,indent=2),encoding='utf-8')
-print('DIAGNOSTIC='+json.dumps(summary,separators=(',',':')))
+(out/'live_catalog.json').write_text(json.dumps({'summary':summary,'files':files},indent=2,ensure_ascii=False),encoding='utf-8')
+(out/'live_summary.json').write_text(json.dumps(summary,indent=2),encoding='utf-8')
+print('FREEBIBLEACCESS_SUMMARY='+json.dumps(summary,separators=(',',':')))
