@@ -1,0 +1,27 @@
+name: FreeBibleAccess catalog snapshot
+
+on:
+  push:
+    branches:
+      - scratch/freebibleaccess-ingest
+    paths:
+      - '.freebibleaccess/**'
+      - '.github/workflows/freebibleaccess-catalog.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  fetch-catalog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch live public catalog
+        run: python .freebibleaccess/fetch_catalog.py
+      - name: Upload catalog snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: freebibleaccess-live-catalog
+          path: freebibleaccess-output/
+          if-no-files-found: error
